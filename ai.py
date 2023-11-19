@@ -1,85 +1,68 @@
-import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import clone_model
-from snake import gameloop
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import os
 
-# Número de redes na população
-POPULATION_SIZE = 20
-# Taxa de mutação
-MUTATION_RATE = 0.1
-# Número de gerações
-GENERATIONS = 50
+class Linear_QNet(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super().__init__()
+        self.linear1 = nn.Linear(input_size, hidden_size)
+        self.linear2 = nn.Linear(hidden_size, output_size)
 
-# Função para criar uma população inicial
-def create_population():
-    population = []
-    for _ in range(POPULATION_SIZE):
-        model = tf.keras.Sequential([
-            tf.keras.layers.Dense(64, activation='relu', input_shape=(2,)),
-            tf.keras.layers.Dense(64, activation='relu'),
-            tf.keras.layers.Dense(4, activation='softmax')
-        ])
-        population.append(model)
-    return population
+    def forward(self, x):
+        x = F.relu(self.linear1(x))
+        x = self.linear2(x)
+        return x
 
-# Avaliar o desempenho da rede
-def evaluate(model):
-    return gameloop(model)
+    def save(self, file_name='model.pth'):
+        model_folder_path = './model'
+        if not os.path.exists(model_folder_path):
+            os.makedirs(model_folder_path)
 
-# Selecionar os melhores modelos
-def select_parents(population, fitness_scores, tournament_size=3):
-    selected_parents = []
-    population_size = len(population)
+        file_name = os.path.join(model_folder_path, file_name)
+        torch.save(self.state_dict(), file_name)
 
-    for _ in range(population_size):
-        indices = np.random.choice(range(population_size), tournament_size, replace=False)
-        best_individual_idx = indices[np.argmax([fitness_scores[i] for i in indices])]
-        selected_parents.append(population[best_individual_idx])
 
-    return selected_parents
+class QTrainer:
+    def __init__(self, model, lr, gamma):
+        self.lr = lr
+        self.gamma = gamma
+        self.model = model
+        self.optimizer = optim.Adam(model.parameters(), lr=self.lr)
+        self.criterion = nn.MSELoss()
 
-# Crossover entre dois modelos
-def crossover(parent1, parent2):
-    child = clone_model(parent1)
-    weights1 = parent1.get_weights()
-    weights2 = parent2.get_weights()
-    new_weights = []
-    for w1, w2 in zip(weights1, weights2):
-        mask = np.random.randint(0, 2, w1.shape)
-        new_weight = mask * w1 + (1 - mask) * w2
-        new_weights.append(new_weight)
-    child.set_weights(new_weights)
-    return child
+    def train_step(self, state, action, reward, next_state, done):
+        state = torch.tensor(state, dtype=torch.float)
+        next_state = torch.tensor(next_state, dtype=torch.float)
+        action = torch.tensor(action, dtype=torch.long)
+        reward = torch.tensor(reward, dtype=torch.float)
+        # (n, x)
 
-# Mutação no modelo
-def mutate(model):
-    weights = model.get_weights()
-    new_weights = []
-    for weight in weights:
-        if np.random.rand() < MUTATION_RATE:
-            mutation = np.random.normal(0, 1, weight.shape)
-            new_weight = weight + mutation
-        else:
-            new_weight = weight
-        new_weights.append(new_weight)
-    model.set_weights(new_weights)
+        if len(state.shape) == 1:
+            # (1, x)
+            state = torch.unsqueeze(state, 0)
+            next_state = torch.unsqueeze(next_state, 0)
+            action = torch.unsqueeze(action, 0)
+            reward = torch.unsqueeze(reward, 0)
+            done = (done, )
 
-# Algoritmo Genético
-def genetic_algorithm():
-    population = create_population()
-    for generation in range(GENERATIONS):
-        fitness_scores = [evaluate(model) for model in population]
-        parents = select_parents(population, fitness_scores)
-        new_population = []
-        for p in range(POPULATION_SIZE // 2):
-            print(generation+1, p+1)
-            parent1, parent2 = np.random.choice(parents, 2, replace=False)
-            child1 = crossover(parent1, parent2)
-            child2 = crossover(parent1, parent2)
-            mutate(child1)
-            mutate(child2)
-            new_population.extend([child1, child2])
-        population = new_population
+        # 1: predicted Q values with current state
+        pred = self.model(state)
 
-# Executar o algoritmo genético
-genetic_algorithm()
+        target = pred.clone()
+        for idx in range(len(done)):
+            Q_new = reward[idx]
+            if not done[idx]:
+                Q_new = reward[idx] + self.gamma * torch.max(self.model(next_state[idx]))
+
+            target[idx][torch.argmax(action[idx]).item()] = Q_new
+    
+        # 2: Q_new = r + y * max(next_predicted Q value) -> only do this if not done
+        # pred.clone()
+        # preds[argmax(action)] = Q_new
+        self.optimizer.zero_grad()
+        loss = self.criterion(target, pred)
+        loss.backward()
+
+        self.optimizer.step()
